@@ -1,0 +1,152 @@
+// Data model for Slate: café owners, their menu sections (with sizes) and dishes.
+// After editing: `npm run db:migrate -- --name <change>` (creates a migration + regenerates the client).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  name         String
+  /// E.164, e.g. +919876543210. Used to sign in.
+  phone        String    @unique
+  passwordHash String    @map("password_hash")
+  /// Consecutive failed sign-ins; reset on success. Drives the temporary lockout.
+  failedLogins Int       @default(0) @map("failed_logins")
+  lockedUntil  DateTime? @map("locked_until") @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  cafe     Cafe?
+  sessions Session[]
+
+  @@map("users")
+}
+
+model Session {
+  /// SHA-256 of the session token. The raw token only ever lives in the owner's cookie.
+  id        String   @id
+  userId    String   @map("user_id") @db.Uuid
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Cafe {
+  id        String   @id @default(uuid()) @db.Uuid
+  /// One café per owner for now.
+  ownerId   String   @unique @map("owner_id") @db.Uuid
+  name      String
+  /// Public menu address: /m/<slug>. Printed into QR codes, so changing it breaks old codes.
+  slug      String   @unique
+  tagline   String   @default("")
+  address   String   @default("")
+  phone     String   @default("")
+  currency  String   @default("INR") @db.VarChar(3)
+  /// Small data-URL image until file storage exists.
+  logo      String   @default("")
+  notices   String[] @default([])
+  instagram String   @default("")
+  facebook  String   @default("")
+  zomato    String   @default("")
+  swiggy    String   @default("")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  owner    User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  sections Section[]
+  items    Item[]
+
+  @@map("cafes")
+}
+
+/// A menu section such as "Hot Coffee" or "Pizza". Ordered by `position`.
+model Section {
+  id        String   @id @default(uuid()) @db.Uuid
+  cafeId    String   @map("cafe_id") @db.Uuid
+  name      String
+  /// Shown under the section, e.g. "Add any topping for ₹20".
+  note      String   @default("")
+  /// Line icon next to the title, e.g. "pizza". Keys: SECTION_ICONS in the shared cafe schema.
+  icon      String   @default("none")
+  position  Int
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  cafe  Cafe          @relation(fields: [cafeId], references: [id], onDelete: Cascade)
+  sizes SectionSize[]
+  items Item[]
+
+  @@index([cafeId, position])
+  @@map("sections")
+}
+
+/// A price column of a section, e.g. "Small". A section with no sizes has one price per dish.
+model SectionSize {
+  id        String @id @default(uuid()) @db.Uuid
+  sectionId String @map("section_id") @db.Uuid
+  label     String
+  position  Int
+
+  section Section     @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  /// Deleting a size deletes its prices.
+  prices  ItemPrice[]
+
+  @@index([sectionId, position])
+  @@map("section_sizes")
+}
+
+model Item {
+  id            String   @id @default(uuid()) @db.Uuid
+  cafeId        String   @map("cafe_id") @db.Uuid
+  /// A section with dishes can't be deleted on its own; move or delete the dishes first.
+  /// NoAction (not Restrict) is checked at the end of the statement, so deleting a whole
+  /// café still cascades through its sections and dishes.
+  sectionId     String   @map("section_id") @db.Uuid
+  name          String
+  description   String   @default("")
+  /// "none" | "percent" | "flat" — validated by the shared Zod schema.
+  discountType  String   @default("none") @map("discount_type")
+  discountValue Decimal? @map("discount_value") @db.Decimal(10, 2)
+  /// "unspecified" | "veg" | "egg" | "non-veg"
+  dietary       String   @default("unspecified")
+  /// "none" | "bestseller" | "new" | "special"
+  tag           String   @default("none")
+  isAvailable   Boolean  @default(true) @map("is_available")
+  /// Order within the section (ascending).
+  position      Int
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  cafe    Cafe        @relation(fields: [cafeId], references: [id], onDelete: Cascade)
+  section Section     @relation(fields: [sectionId], references: [id], onDelete: NoAction)
+  prices  ItemPrice[]
+
+  @@index([cafeId])
+  @@index([sectionId, position])
+  @@map("items")
+}
+
+/// One row per size the dish is sold in. `sizeId` is null for sections without sizes.
+model ItemPrice {
+  id     String  @id @default(uuid()) @db.Uuid
+  itemId String  @map("item_id") @db.Uuid
+  sizeId String? @map("size_id") @db.Uuid
+  amount Decimal @db.Decimal(10, 2)
+
+  item Item         @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  size SectionSize? @relation(fields: [sizeId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, sizeId])
+  @@index([sizeId])
+  @@map("item_prices")
+}
